@@ -91,21 +91,34 @@ class PresenceEvaluator:
             vm = (np.asarray(valid_mask_hw) > 0).astype(np.float32)
             valid_frac = float(vm.mean())
             seg_m = seg_probs * vm[None, :, :]
-            area = seg_m.mean(axis=(1, 2))
-            peak = seg_m.max(axis=(1, 2))
         else:
             vm = None
             valid_frac = 1.0
-            area = seg_probs.mean(axis=(1, 2))
-            peak = seg_probs.max(axis=(1, 2))
+            seg_m = seg_probs
 
-        exp = self.expected_area_ratios * valid_frac
-        if len(exp) != seg_probs.shape[0]:
-            exp = np.ones((seg_probs.shape[0],), dtype=np.float32) * 0.15 * valid_frac
-
-        area_norm = np.clip(area / (exp + 1e-8), 0.0, 1.0)
-        peak_gate = np.clip((peak - 0.5) / 0.5, 0.0, 1.0)
-        s = area_norm * peak_gate
+        # Priority 3: Area-based presence (decoupled from probability magnitude)
+        # Threshold at 0.3 instead of using raw probabilities
+        binary_masks = (seg_m > 0.3).astype(np.float32)
+        
+        # Count actual pixels (area-based, not probability-based)
+        pixel_counts = binary_masks.sum(axis=(1, 2))
+        total_pixels = float(seg_m.shape[1] * seg_m.shape[2])
+        
+        # Expected pixel counts (absolute, not normalized by mean)
+        exp_pixels = self.expected_area_ratios * total_pixels * valid_frac
+        if len(exp_pixels) != seg_probs.shape[0]:
+            exp_pixels = np.ones((seg_probs.shape[0],), dtype=np.float32) * 0.15 * total_pixels * valid_frac
+        
+        # Area-based normalization (sigmoid for smooth transition)
+        area_scores = 1.0 / (1.0 + np.exp(-5.0 * (pixel_counts / (exp_pixels + 1e-8) - 0.5)))
+        
+        # Peak confidence (still useful for rejecting noise)
+        peak = seg_m.max(axis=(1, 2))
+        peak_gate = np.clip((peak - 0.3) / 0.7, 0.0, 1.0)  # Relaxed threshold
+        
+        # Combine area and peak (area is primary, peak is secondary)
+        s = 0.7 * area_scores + 0.3 * peak_gate
+        
         w = self.structure_weights
         if len(w) != seg_probs.shape[0]:
             w = np.ones((seg_probs.shape[0],), dtype=np.float32) / float(seg_probs.shape[0])
@@ -117,10 +130,15 @@ class PresenceEvaluator:
         else:
             lv_geom, lv_area_ratio = self._lv_geometry_valid(seg_probs[0], None)
 
-        coexist = float(min(area_norm[0], area_norm[2])) if seg_probs.shape[0] >= 3 else float(area_norm[0])
+        # Coexistence based on area scores (not probability)
+        coexist = float(min(area_scores[0], area_scores[2])) if seg_probs.shape[0] >= 3 else float(area_scores[0])
         agreement = float(np.clip(coexist, 0.0, 1.0))
 
         presence_score = float(np.clip(structure_score * lv_geom * (0.25 + 0.75 * agreement), 0.0, 1.0))
+        
+        # For backward compatibility, also compute old-style area/peak
+        area = seg_m.mean(axis=(1, 2))
+        peak_old = seg_m.max(axis=(1, 2))
 
         return {
             "presence_score": presence_score,
