@@ -9,6 +9,11 @@ from albumentations.pytorch import ToTensorV2
 import cv2
 from scipy.ndimage import gaussian_filter
 
+try:
+    from ground_truth import GroundTruthConstructor
+except ImportError:
+    from src.ground_truth import GroundTruthConstructor
+
 
 def _apply_clahe(img_u8: np.ndarray, clip_limit=2.0, tile_size=8) -> np.ndarray:
     """Apply CLAHE for contrast enhancement (domain adaptation)"""
@@ -150,6 +155,9 @@ class CAMUSDataset(Dataset):
             self.quality_map = {"poor": 0.3, "medium": 0.6, "good": 0.99}
         else:
             self.quality_map = {str(k).strip().lower(): float(v) for k, v in dict(quality_map).items()}
+        
+        # Mathematical redesign: Ground truth constructor for presence/quality
+        self.gt_constructor = GroundTruthConstructor()
         
         # CAMUS structure: patient0001/patient0001_2CH_ED.nii.gz
         # We focus on ED and ES frames which have GT
