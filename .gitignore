@@ -1,0 +1,38 @@
+# Dataset
+data/
+
+# Trained models and checkpoints
+checkpoints/
+*.pth
+*.npz
+
+# Training logs
+training_*.log
+nohup.out
+
+# Test results (videos, plots, scores)
+test/*.mp4
+test/*.avi
+test/*.png
+test/**/*.mp4
+test/**/*.avi
+test/**/*.npy
+test/**/*.png
+test/**/*.mp4
+test/rollback_results*/
+test/backup/
+
+# Backups
+backups/
+restore_test/
+
+# Large data files
+*.zip
+*.tar.gz
+*.tgz
+*.nii.gz
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

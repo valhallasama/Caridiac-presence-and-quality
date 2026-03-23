@@ -1,0 +1,8 @@
+torch
+torchvision
+albumentations
+opencv-python-headless
+numpy
+tqdm
+scikit-learn
+nibabel
