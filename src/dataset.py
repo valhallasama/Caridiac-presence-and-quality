@@ -72,6 +72,65 @@ def _generate_ultrasound_noise(shape, base_intensity=128, speckle_std=30) -> np.
     return np.clip(noise, 0, 255).astype(np.uint8)
 
 
+def _generate_irregular_mask(shape, num_blobs=3, blob_size_range=(20, 80)) -> np.ndarray:
+    """Generate irregular mask using random blobs (better than straight cuts)"""
+    h, w = shape
+    mask = np.zeros((h, w), dtype=np.uint8)
+    
+    for _ in range(num_blobs):
+        # Random blob center
+        cy = np.random.randint(0, h)
+        cx = np.random.randint(0, w)
+        
+        # Random blob size
+        radius = np.random.randint(blob_size_range[0], blob_size_range[1])
+        
+        # Create ellipse (irregular shape)
+        axes = (radius, int(radius * np.random.uniform(0.5, 1.5)))
+        angle = np.random.randint(0, 180)
+        
+        cv2.ellipse(mask, (cx, cy), axes, angle, 0, 360, 1, -1)
+    
+    # Smooth edges for more natural appearance
+    mask = cv2.GaussianBlur(mask.astype(np.float32), (11, 11), 0)
+    mask = (mask > 0.3).astype(np.uint8)
+    
+    return mask
+
+
+def _apply_appearance_degradation(img_u8: np.ndarray, degradation_type: str = 'random') -> np.ndarray:
+    """
+    TYPE 4: Appearance degradation for domain robustness
+    Simulates: dark images, noise, blur, contrast drop
+    """
+    result = img_u8.copy().astype(np.float32)
+    
+    if degradation_type == 'random':
+        degradation_type = np.random.choice(['darken', 'noise', 'blur', 'contrast', 'combined'])
+    
+    if degradation_type == 'darken' or degradation_type == 'combined':
+        # Simulate dark/low gain
+        factor = np.random.uniform(0.4, 0.7)
+        result = result * factor
+    
+    if degradation_type == 'noise' or degradation_type == 'combined':
+        # Add speckle noise
+        noise = np.random.randn(*result.shape) * np.random.uniform(10, 30)
+        result = result + noise
+    
+    if degradation_type == 'blur' or degradation_type == 'combined':
+        # Simulate motion blur or poor focus
+        kernel_size = np.random.choice([3, 5, 7])
+        result = cv2.GaussianBlur(result, (kernel_size, kernel_size), 0)
+    
+    if degradation_type == 'contrast' or degradation_type == 'combined':
+        # Reduce contrast
+        mean = result.mean()
+        result = mean + (result - mean) * np.random.uniform(0.5, 0.8)
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
 def _inpaint_realistic_ultrasound(img_gray_u8: np.ndarray, hole_mask_u8: np.ndarray) -> np.ndarray:
     """Replace inpainting with realistic ultrasound noise/background"""
     if img_gray_u8.ndim != 2:
@@ -271,21 +330,17 @@ class CAMUSDataset(Dataset):
             mask = mask[:, :, 0]
 
         synth_kind = None
+        synth_subtype = None
         if self.phase == "train" and (self.synthetic_neg_prob > 0.0 or self.synthetic_partial_prob > 0.0):
             r = float(np.random.random())
             if r < self.synthetic_neg_prob:
                 synth_kind = "neg"
             elif r < (self.synthetic_neg_prob + self.synthetic_partial_prob):
                 synth_kind = "partial"
+                # Choose partial subtype
+                synth_subtype = np.random.choice(['semantic', 'spatial', 'hybrid'], p=[0.4, 0.3, 0.3])
             
-        # Rotate to standard orientation if needed
-        # CAMUS images are often rotated. 
-        # For this implementation, we rely on the network learning or raw data.
-        # But typically we might want to normalize orientation. 
-        # Let's start with raw data + resize.
-        
         # Priority 1 Fix: Per-image normalization BEFORE uint8 conversion
-        # This handles domain gap between CAMUS and Ultraprobe
         img_normalized = _normalize_per_image(img)
         
         # Convert to 0-255 uint8 for processing
@@ -295,36 +350,79 @@ class CAMUSDataset(Dataset):
         # Priority 1 Fix: Apply CLAHE for contrast enhancement (domain adaptation)
         img = _apply_clahe(img, clip_limit=2.0, tile_size=8)
 
+        # COMPREHENSIVE SYNTHETIC STRATEGY (Research-level)
         if synth_kind is not None:
             mask_lbl = np.asarray(mask)
             heart = (mask_lbl > 0).astype(np.uint8)
+            
             if int(heart.sum()) > 0:
                 if synth_kind == "neg":
-                    # Priority 1 Fix: Use realistic ultrasound noise instead of inpainting
+                    # TYPE 1: Negative (remove all structures)
                     img = _inpaint_realistic_ultrasound(img, heart)
                     mask = np.zeros_like(mask_lbl)
-                else:
-                    h, w = heart.shape
-                    rm = np.zeros_like(heart)
-                    if float(np.random.random()) < 0.5:
-                        cut = int(np.random.randint(max(1, h // 4), max(2, (3 * h) // 4)))
-                        if float(np.random.random()) < 0.5:
-                            rm[cut:, :] = 1
-                        else:
-                            rm[:cut, :] = 1
-                    else:
-                        cut = int(np.random.randint(max(1, w // 4), max(2, (3 * w) // 4)))
-                        if float(np.random.random()) < 0.5:
-                            rm[:, cut:] = 1
-                        else:
-                            rm[:, :cut] = 1
-                    hole = (heart & rm).astype(np.uint8)
-                    if int(hole.sum()) > 0:
-                        # Priority 1 Fix: Use realistic ultrasound noise instead of inpainting
-                        img = _inpaint_realistic_ultrasound(img, hole)
-                        mask_lbl = mask_lbl.copy()
+                    
+                else:  # partial
+                    mask_lbl = mask_lbl.copy()
+                    hole = None
+                    
+                    if synth_subtype == 'semantic':
+                        # TYPE 2: GT Semantic Removal (NEW - MOST IMPORTANT)
+                        # Randomly remove LV, LA, Myo, or combinations
+                        removal_choice = np.random.choice([
+                            'lv',           # Remove LV only
+                            'la',           # Remove LA only
+                            'myo',          # Remove Myo only
+                            'lv_la',        # Remove LV + LA
+                        ], p=[0.35, 0.35, 0.15, 0.15])
+                        
+                        if removal_choice == 'lv':
+                            hole = (mask_lbl == 1).astype(np.uint8)
+                            mask_lbl[mask_lbl == 1] = 0
+                        elif removal_choice == 'la':
+                            hole = (mask_lbl == 3).astype(np.uint8)
+                            mask_lbl[mask_lbl == 3] = 0
+                        elif removal_choice == 'myo':
+                            hole = (mask_lbl == 2).astype(np.uint8)
+                            mask_lbl[mask_lbl == 2] = 0
+                        elif removal_choice == 'lv_la':
+                            hole = ((mask_lbl == 1) | (mask_lbl == 3)).astype(np.uint8)
+                            mask_lbl[mask_lbl == 1] = 0
+                            mask_lbl[mask_lbl == 3] = 0
+                    
+                    elif synth_subtype == 'spatial':
+                        # TYPE 3: Spatial Partial with Irregular Masks (IMPROVED)
+                        irregular_mask = _generate_irregular_mask(heart.shape, num_blobs=np.random.randint(2, 5))
+                        hole = (heart & irregular_mask).astype(np.uint8)
                         mask_lbl[hole > 0] = 0
-                        mask = mask_lbl
+                    
+                    else:  # hybrid
+                        # TYPE 4: Hybrid (Combine semantic + spatial + appearance)
+                        # First, semantic removal
+                        removal_choice = np.random.choice(['lv', 'la'])
+                        if removal_choice == 'lv':
+                            hole = (mask_lbl == 1).astype(np.uint8)
+                            mask_lbl[mask_lbl == 1] = 0
+                        else:
+                            hole = (mask_lbl == 3).astype(np.uint8)
+                            mask_lbl[mask_lbl == 3] = 0
+                        
+                        # Then, add spatial irregularity
+                        irregular_mask = _generate_irregular_mask(heart.shape, num_blobs=2)
+                        additional_hole = (heart & irregular_mask & (mask_lbl > 0)).astype(np.uint8)
+                        if additional_hole.sum() > 0:
+                            hole = ((hole > 0) | (additional_hole > 0)).astype(np.uint8)
+                            mask_lbl[additional_hole > 0] = 0
+                    
+                    # Inpaint removed regions
+                    if hole is not None and int(hole.sum()) > 0:
+                        img = _inpaint_realistic_ultrasound(img, hole)
+                    
+                    mask = mask_lbl
+        
+        # TYPE 4: Appearance Degradation (applied to ALL samples, not just synthetic)
+        # This is CRITICAL for domain robustness
+        if self.phase == "train" and np.random.random() < 0.3:  # 30% of all training samples
+            img = _apply_appearance_degradation(img, degradation_type='random')
         
         # Process Mask
         # CAMUS GT: 0=background, 1=LV_endo, 2=myocardium, 3=left_atrium
@@ -449,7 +547,7 @@ def get_transforms(phase='train', img_size=256):
             
             # Priority 2: Noise augmentation (ultrasound speckle simulation)
             A.OneOf([
-                A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+                A.GaussNoise(var_limit=50.0, p=1.0),
                 A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
                 A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=1.0),
             ], p=0.5),
