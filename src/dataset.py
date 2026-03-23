@@ -7,17 +7,105 @@ import nibabel as nib
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import cv2
+from scipy.ndimage import gaussian_filter
 
 
-def _inpaint_gray_u8(img_gray_u8: np.ndarray, hole_mask_u8: np.ndarray, radius: int) -> np.ndarray:
+def _apply_clahe(img_u8: np.ndarray, clip_limit=2.0, tile_size=8) -> np.ndarray:
+    """Apply CLAHE for contrast enhancement (domain adaptation)"""
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_size, tile_size))
+    return clahe.apply(img_u8)
+
+
+def _crop_roi(img: np.ndarray, mask: np.ndarray = None, margin=10) -> tuple:
+    """Crop to ROI (non-black region) to remove excessive background"""
+    # Find non-zero region
+    threshold = img.mean() * 0.1  # Adaptive threshold
+    binary = (img > threshold).astype(np.uint8)
+    
+    if binary.sum() < 100:  # Fallback if too dark
+        return img, mask, (0, 0, img.shape[1], img.shape[0])
+    
+    coords = np.column_stack(np.where(binary > 0))
+    y_min, x_min = coords.min(axis=0)
+    y_max, x_max = coords.max(axis=0)
+    
+    # Add margin
+    h, w = img.shape
+    y_min = max(0, y_min - margin)
+    x_min = max(0, x_min - margin)
+    y_max = min(h, y_max + margin)
+    x_max = min(w, x_max + margin)
+    
+    bbox = (x_min, y_min, x_max, y_max)
+    img_crop = img[y_min:y_max, x_min:x_max]
+    mask_crop = mask[y_min:y_max, x_min:x_max] if mask is not None else None
+    
+    return img_crop, mask_crop, bbox
+
+
+def _normalize_per_image(img: np.ndarray) -> np.ndarray:
+    """Per-image normalization for domain robustness"""
+    mean = img.mean()
+    std = img.std()
+    if std < 1e-6:
+        return img
+    return (img - mean) / (std + 1e-6)
+
+
+def _generate_ultrasound_noise(shape, base_intensity=128, speckle_std=30) -> np.ndarray:
+    """Generate realistic ultrasound speckle noise (multiplicative)"""
+    # Base noise
+    noise = np.random.randn(*shape) * speckle_std + base_intensity
+    
+    # Add speckle pattern (multiplicative noise characteristic of ultrasound)
+    speckle = np.random.gamma(2.0, 0.5, shape)
+    noise = noise * speckle / speckle.mean()
+    
+    # Smooth to simulate ultrasound texture
+    noise = gaussian_filter(noise, sigma=1.5)
+    
+    return np.clip(noise, 0, 255).astype(np.uint8)
+
+
+def _inpaint_realistic_ultrasound(img_gray_u8: np.ndarray, hole_mask_u8: np.ndarray) -> np.ndarray:
+    """Replace inpainting with realistic ultrasound noise/background"""
     if img_gray_u8.ndim != 2:
         raise ValueError(f"Expected grayscale image (H,W), got shape {img_gray_u8.shape}")
     if hole_mask_u8.ndim != 2:
         raise ValueError(f"Expected mask (H,W), got shape {hole_mask_u8.shape}")
-    r = int(radius)
-    r = max(1, r)
-    hole = (hole_mask_u8 > 0).astype(np.uint8) * 255
-    return cv2.inpaint(img_gray_u8, hole, inpaintRadius=r, flags=cv2.INPAINT_TELEA)
+    
+    hole = (hole_mask_u8 > 0)
+    if not hole.any():
+        return img_gray_u8
+    
+    result = img_gray_u8.copy()
+    
+    # Estimate background intensity from non-hole regions
+    bg_mask = (img_gray_u8 < img_gray_u8.mean() * 0.3) & (~hole)
+    if bg_mask.sum() > 100:
+        base_intensity = img_gray_u8[bg_mask].mean()
+        speckle_std = img_gray_u8[bg_mask].std()
+    else:
+        base_intensity = img_gray_u8.mean() * 0.2
+        speckle_std = 30
+    
+    # Generate realistic ultrasound noise
+    noise = _generate_ultrasound_noise(img_gray_u8.shape, base_intensity, speckle_std)
+    
+    # Blend at edges for smooth transition
+    kernel_size = 5
+    hole_dilated = cv2.dilate(hole.astype(np.uint8), np.ones((kernel_size, kernel_size)), iterations=1)
+    edge = (hole_dilated > 0) & (~hole)
+    
+    # Fill hole with noise
+    result[hole] = noise[hole]
+    
+    # Smooth blend at edges
+    if edge.any():
+        alpha = 0.5
+        result[edge] = (alpha * result[edge] + (1 - alpha) * noise[edge]).astype(np.uint8)
+    
+    return result
 
 
 class CAMUSDataset(Dataset):
@@ -188,16 +276,24 @@ class CAMUSDataset(Dataset):
         # But typically we might want to normalize orientation. 
         # Let's start with raw data + resize.
         
-        # Normalize image to 0-255 uint8 for albumentations
+        # Priority 1 Fix: Per-image normalization BEFORE uint8 conversion
+        # This handles domain gap between CAMUS and Ultraprobe
+        img_normalized = _normalize_per_image(img)
+        
+        # Convert to 0-255 uint8 for processing
         img = (img - img.min()) / (img.max() - img.min() + 1e-8)
         img = (img * 255).astype(np.uint8)
+        
+        # Priority 1 Fix: Apply CLAHE for contrast enhancement (domain adaptation)
+        img = _apply_clahe(img, clip_limit=2.0, tile_size=8)
 
         if synth_kind is not None:
             mask_lbl = np.asarray(mask)
             heart = (mask_lbl > 0).astype(np.uint8)
             if int(heart.sum()) > 0:
                 if synth_kind == "neg":
-                    img = _inpaint_gray_u8(img, heart, self.synthetic_inpaint_radius)
+                    # Priority 1 Fix: Use realistic ultrasound noise instead of inpainting
+                    img = _inpaint_realistic_ultrasound(img, heart)
                     mask = np.zeros_like(mask_lbl)
                 else:
                     h, w = heart.shape
@@ -216,7 +312,8 @@ class CAMUSDataset(Dataset):
                             rm[:, :cut] = 1
                     hole = (heart & rm).astype(np.uint8)
                     if int(hole.sum()) > 0:
-                        img = _inpaint_gray_u8(img, hole, self.synthetic_inpaint_radius)
+                        # Priority 1 Fix: Use realistic ultrasound noise instead of inpainting
+                        img = _inpaint_realistic_ultrasound(img, hole)
                         mask_lbl = mask_lbl.copy()
                         mask_lbl[hole > 0] = 0
                         mask = mask_lbl

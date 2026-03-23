@@ -3,6 +3,7 @@ torchvision
 albumentations
 opencv-python-headless
 numpy
+scipy
 tqdm
 scikit-learn
 nibabel

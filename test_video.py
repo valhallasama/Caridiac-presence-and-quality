@@ -71,6 +71,10 @@ def infer_single_frame_bgr(frame_bgr, model, device, transform, presence_eval: P
     fan_mask_u8 = _compute_fan_mask_bgr(vis_img)
     masked_bgr = vis_img.copy()
     masked_bgr[fan_mask_u8 == 0] = 0
+    
+    # Priority 1 Fix: Apply CLAHE for domain adaptation (matches training)
+    masked_bgr = _apply_clahe_inference(masked_bgr, clip_limit=2.0, tile_size=8)
+    
     img_rgb = cv2.cvtColor(masked_bgr, cv2.COLOR_BGR2RGB)
 
     augmented = transform(image=img_rgb)["image"]
