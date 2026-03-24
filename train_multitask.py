@@ -126,7 +126,15 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, total_ep
     epoch_losses = {k: v / num_batches for k, v in running_losses.items()}
     epoch_dice = running_dice / num_batches
     
-    return epoch_losses, epoch_dice
+    # Add actual prediction statistics (not just losses)
+    epoch_stats = {
+        'presence_pred_mean': outputs['presence'].mean().item() if 'presence' in outputs else 0.0,
+        'presence_gt_mean': presence_gt.mean().item() if presence_gt is not None else 0.0,
+        'quality_pred_mean': outputs['quality'].mean().item() if 'quality' in outputs else 0.0,
+        'quality_gt_mean': quality_gt.mean().item() if quality_gt is not None else 0.0,
+    }
+    
+    return epoch_losses, epoch_dice, epoch_stats
 
 
 def validate(model, loader, criterion, device, gt_constructor):
@@ -190,7 +198,15 @@ def validate(model, loader, criterion, device, gt_constructor):
     val_losses = {k: v / num_batches for k, v in running_losses.items()}
     val_dice = running_dice / num_batches
     
-    return val_losses, val_dice
+    # Add actual prediction statistics
+    val_stats = {
+        'presence_pred_mean': outputs['presence'].mean().item() if 'presence' in outputs else 0.0,
+        'presence_gt_mean': presence_gt.mean().item() if presence_gt is not None else 0.0,
+        'quality_pred_mean': outputs['quality'].mean().item() if 'quality' in outputs else 0.0,
+        'quality_gt_mean': quality_gt.mean().item() if quality_gt is not None else 0.0,
+    }
+    
+    return val_losses, val_dice, val_stats
 
 
 def main():
@@ -303,13 +319,14 @@ def main():
     
     for epoch in range(start_epoch, args.epochs):
         # Train
-        train_losses, train_dice = train_one_epoch(
-            model, train_loader, criterion, optimizer, device,
-            epoch, args.epochs, gt_constructor
+        train_losses, train_dice, train_stats = train_one_epoch(
+            model, train_loader, criterion, optimizer, device, gt_constructor, stage
         )
         
         # Validate
-        val_losses, val_dice = validate(model, val_loader, criterion, device, gt_constructor)
+        val_losses, val_dice, val_stats = validate(
+            model, val_loader, criterion, device, gt_constructor
+        )
         
         # Update learning rate
         scheduler.step()
@@ -320,8 +337,10 @@ def main():
         print(f'  Val   - Loss: {val_losses["total"]:.4f}, Dice: {val_dice:.4f}')
         
         if epoch >= 50:  # Multi-task stage
-            print(f'  Train - Presence: {train_losses.get("presence", 0):.4f}, Quality: {train_losses.get("quality", 0):.4f}')
-            print(f'  Val   - Presence: {val_losses.get("presence", 0):.4f}, Quality: {val_losses.get("quality", 0):.4f}')
+            print(f'  Train - Presence Loss: {train_losses.get("presence", 0):.4f}, Quality Loss: {train_losses.get("quality", 0):.4f}')
+            print(f'  Val   - Presence Loss: {val_losses.get("presence", 0):.4f}, Quality Loss: {val_losses.get("quality", 0):.4f}')
+            print(f'  Train - Presence Pred/GT: {train_stats["presence_pred_mean"]:.3f}/{train_stats["presence_gt_mean"]:.3f}, Quality Pred/GT: {train_stats["quality_pred_mean"]:.3f}/{train_stats["quality_gt_mean"]:.3f}')
+            print(f'  Val   - Presence Pred/GT: {val_stats["presence_pred_mean"]:.3f}/{val_stats["presence_gt_mean"]:.3f}, Quality Pred/GT: {val_stats["quality_pred_mean"]:.3f}/{val_stats["quality_gt_mean"]:.3f}')
         
         # Save checkpoint
         checkpoint = {
