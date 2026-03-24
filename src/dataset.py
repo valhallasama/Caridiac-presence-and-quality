@@ -463,7 +463,8 @@ class CAMUSDataset(Dataset):
         areas = mask.sum(dim=(1, 2))
         structure_presence = (areas > 50).float()
 
-        presence_label = float(structure_presence.sum().item() > 0.0)
+        # Compute continuous geometry-based presence using GroundTruthConstructor
+        presence_label = self.gt_constructor.compute_presence_gt(mask.numpy())
         if synth_kind == "neg":
             presence_label = 0.0
         presence_label = torch.tensor([presence_label], dtype=torch.float32)
@@ -489,33 +490,16 @@ class CAMUSDataset(Dataset):
             # Use CAMUS labels as primary quality
             quality = camus_quality
         else:
-            # Fan-area-normalized continuous quality calculation
-            # Normalizes by actual fan area to make quality comparable across different fan sizes
-            
-            # Compute fan area (non-zero pixels in any structure)
-            fan_area = float((mask.sum(dim=0) > 0).sum())
-            total_pixels = float(mask.shape[1] * mask.shape[2])
-            
-            # If no structures detected, use total frame as fallback
-            if fan_area < 100:
-                fan_area = total_pixels
-            
-            # Expected pixel counts as percentage of FAN AREA (not total frame)
-            expected_lv_pixels = fan_area * 0.20    # 20% of fan area
-            expected_myo_pixels = fan_area * 0.30   # 30% of fan area
-            expected_la_pixels = fan_area * 0.15    # 15% of fan area
-            
-            # Normalize to 0-1 (continuous, not binary)
-            lv_norm = min(float(areas[0]) / expected_lv_pixels, 1.0) if expected_lv_pixels > 0 else 0.0
-            myo_norm = min(float(areas[1]) / expected_myo_pixels, 1.0) if expected_myo_pixels > 0 else 0.0
-            la_norm = min(float(areas[2]) / expected_la_pixels, 1.0) if expected_la_pixels > 0 else 0.0
-            
-            # Weighted combination (pure, no artificial baseline)
-            q = 0.45 * lv_norm + 0.20 * myo_norm + 0.25 * la_norm + 0.10 * lv_norm
+            # Physics-based quality using GroundTruthConstructor
+            # Combines sharpness, contrast, and structure completeness
+            quality_value = self.gt_constructor.compute_quality_gt(
+                img.numpy().transpose(1, 2, 0),  # (C, H, W) -> (H, W, C)
+                mask.numpy()
+            )
             
             if quality_override is not None:
-                q = float(quality_override)
-            quality = torch.tensor([q], dtype=torch.float32)
+                quality_value = float(quality_override)
+            quality = torch.tensor([quality_value], dtype=torch.float32)
         
         # View: A4C=0, A2C=1, Other=2
         # In this dataset we only have 2CH and 4CH labeled.

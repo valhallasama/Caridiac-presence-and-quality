@@ -129,17 +129,33 @@ class AnatomicalConstraintLoss(nn.Module):
         myo_area = myo.sum(dim=(1, 2))  # (B,)
         la_area = la.sum(dim=(1, 2))    # (B,)
         
-        # Constraint 1: LV should be smaller than Myo
+        # Only apply constraints when structures are present (avoid division by near-zero)
+        # This is critical for synthetic negatives/partials
+        min_area_threshold = 100.0  # Minimum pixels to consider structure present
+        
+        # Constraint 1: LV should be smaller than Myo (when both present)
         # Ratio should be in reasonable range (0.3 - 0.8)
-        ratio = lv_area / (myo_area + 1e-6)
-        ratio_loss = F.relu(ratio - 0.8) + F.relu(0.3 - ratio)
+        valid_lv_myo = (lv_area > min_area_threshold) & (myo_area > min_area_threshold)
+        if valid_lv_myo.any():
+            ratio = lv_area[valid_lv_myo] / (myo_area[valid_lv_myo] + 1e-6)
+            ratio = torch.clamp(ratio, 0.0, 2.0)  # Clip to prevent explosion
+            ratio_loss = F.relu(ratio - 0.8) + F.relu(0.3 - ratio)
+            ratio_loss = ratio_loss.mean()
+        else:
+            ratio_loss = torch.tensor(0.0, device=seg_probs.device)
         
-        # Constraint 2: LA should be reasonable relative to LV
+        # Constraint 2: LA should be reasonable relative to LV (when both present)
         # Ratio should be in range (0.2 - 1.5)
-        la_lv_ratio = la_area / (lv_area + 1e-6)
-        la_loss = F.relu(la_lv_ratio - 1.5) + F.relu(0.2 - la_lv_ratio)
+        valid_la_lv = (la_area > min_area_threshold) & (lv_area > min_area_threshold)
+        if valid_la_lv.any():
+            la_lv_ratio = la_area[valid_la_lv] / (lv_area[valid_la_lv] + 1e-6)
+            la_lv_ratio = torch.clamp(la_lv_ratio, 0.0, 3.0)  # Clip to prevent explosion
+            la_loss = F.relu(la_lv_ratio - 1.5) + F.relu(0.2 - la_lv_ratio)
+            la_loss = la_loss.mean()
+        else:
+            la_loss = torch.tensor(0.0, device=seg_probs.device)
         
-        return ratio_loss.mean() + la_loss.mean()
+        return ratio_loss + la_loss
 
 
 class MultiTaskLoss(nn.Module):
