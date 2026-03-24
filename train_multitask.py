@@ -325,6 +325,14 @@ def main():
     print('=' * 80)
     
     for epoch in range(start_epoch, args.epochs):
+        # Determine training stage
+        if epoch < 50:
+            stage = 'seg_only'
+        elif epoch < 150:
+            stage = 'multi_task'
+        else:
+            stage = 'full'
+        
         # Train
         train_losses, train_dice, train_stats = train_one_epoch(
             model, train_loader, criterion, optimizer, device, gt_constructor, stage
