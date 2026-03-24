@@ -221,6 +221,7 @@ def main():
     parser.add_argument('--synthetic_partial_prob', type=float, default=0.3, help='Synthetic partial probability')
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     parser.add_argument('--resume', type=str, default=None, help='Resume from checkpoint')
+    parser.add_argument('--start_epoch', type=int, default=None, help='Override start epoch (useful for resuming from specific stage)')
     
     args = parser.parse_args()
     
@@ -306,6 +307,12 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_dice = checkpoint.get('best_val_dice', 0.0)
+        
+        # Allow overriding start epoch (useful for resuming from specific stage)
+        if args.start_epoch is not None:
+            print(f'Overriding start epoch: {start_epoch} -> {args.start_epoch}')
+            start_epoch = args.start_epoch
+        
         print(f'Resumed from epoch {start_epoch}, best Dice: {best_val_dice:.4f}')
     
     # Training loop
