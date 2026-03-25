@@ -158,6 +158,7 @@ class MultiStructureGuidanceNet(nn.Module):
             nn.Linear(c3_ch, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
+            nn.Sigmoid(),  # Constrain to [0,1]
         )
 
         self.quality_head = nn.Sequential(
@@ -166,6 +167,7 @@ class MultiStructureGuidanceNet(nn.Module):
             nn.Linear(c3_ch, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
+            nn.Sigmoid(),  # Constrain to [0,1]
         )
 
         self.camus_quality_head = nn.Sequential(
@@ -174,6 +176,7 @@ class MultiStructureGuidanceNet(nn.Module):
             nn.Linear(c3_ch, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
+            nn.Sigmoid(),  # Constrain to [0,1]
         )
 
         self.view_head = nn.Sequential(
