@@ -57,6 +57,10 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, total_ep
         'anatomical': 0.0,
     }
     running_dice = 0.0
+    running_presence_pred = 0.0
+    running_presence_gt = 0.0
+    running_quality_pred = 0.0
+    running_quality_gt = 0.0
     
     pbar = tqdm(loader, desc=f'Epoch {epoch+1}/{total_epochs} [{stage_name}]')
     
@@ -112,6 +116,14 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, total_ep
         dice, _ = dice_coeff_multi(seg_probs, masks)
         running_dice += dice
         
+        # Accumulate presence/quality statistics
+        if 'presence' in outputs:
+            running_presence_pred += outputs['presence'].mean().item()
+            running_presence_gt += presence_gt.mean().item()
+        if 'quality' in outputs:
+            running_quality_pred += outputs['quality'].mean().item()
+            running_quality_gt += quality_gt.mean().item()
+        
         # Update progress bar
         if batch_idx % 10 == 0:
             avg_loss = running_losses['total'] / (batch_idx + 1)
@@ -126,12 +138,12 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch, total_ep
     epoch_losses = {k: v / num_batches for k, v in running_losses.items()}
     epoch_dice = running_dice / num_batches
     
-    # Add actual prediction statistics (not just losses)
+    # Add actual prediction statistics (averaged across all batches)
     epoch_stats = {
-        'presence_pred_mean': outputs['presence'].mean().item() if 'presence' in outputs else 0.0,
-        'presence_gt_mean': presence_gt.mean().item() if presence_gt is not None else 0.0,
-        'quality_pred_mean': outputs['quality'].mean().item() if 'quality' in outputs else 0.0,
-        'quality_gt_mean': quality_gt.mean().item() if quality_gt is not None else 0.0,
+        'presence_pred_mean': running_presence_pred / num_batches,
+        'presence_gt_mean': running_presence_gt / num_batches,
+        'quality_pred_mean': running_quality_pred / num_batches,
+        'quality_gt_mean': running_quality_gt / num_batches,
     }
     
     return epoch_losses, epoch_dice, epoch_stats
@@ -148,6 +160,10 @@ def validate(model, loader, criterion, device, gt_constructor):
         'quality': 0.0,
     }
     running_dice = 0.0
+    running_presence_pred = 0.0
+    running_presence_gt = 0.0
+    running_quality_pred = 0.0
+    running_quality_gt = 0.0
     
     with torch.no_grad():
         for batch_data in tqdm(loader, desc='Validation'):
@@ -192,18 +208,26 @@ def validate(model, loader, criterion, device, gt_constructor):
             seg_probs = torch.sigmoid(outputs['seg'])
             dice, _ = dice_coeff_multi(seg_probs, masks)
             running_dice += dice
+            
+            # Accumulate presence/quality statistics
+            if 'presence' in outputs:
+                running_presence_pred += outputs['presence'].mean().item()
+                running_presence_gt += presence_gt.mean().item()
+            if 'quality' in outputs:
+                running_quality_pred += outputs['quality'].mean().item()
+                running_quality_gt += quality_gt.mean().item()
     
     # Compute averages
     num_batches = len(loader)
     val_losses = {k: v / num_batches for k, v in running_losses.items()}
     val_dice = running_dice / num_batches
     
-    # Add actual prediction statistics
+    # Add actual prediction statistics (averaged across all batches)
     val_stats = {
-        'presence_pred_mean': outputs['presence'].mean().item() if 'presence' in outputs else 0.0,
-        'presence_gt_mean': presence_gt.mean().item() if presence_gt is not None else 0.0,
-        'quality_pred_mean': outputs['quality'].mean().item() if 'quality' in outputs else 0.0,
-        'quality_gt_mean': quality_gt.mean().item() if quality_gt is not None else 0.0,
+        'presence_pred_mean': running_presence_pred / num_batches,
+        'presence_gt_mean': running_presence_gt / num_batches,
+        'quality_pred_mean': running_quality_pred / num_batches,
+        'quality_gt_mean': running_quality_gt / num_batches,
     }
     
     return val_losses, val_dice, val_stats
